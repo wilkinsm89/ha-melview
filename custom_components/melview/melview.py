@@ -7,6 +7,7 @@ from aiohttp import ClientError, ClientSession
 from homeassistant.components.climate.const import HVACMode
 
 from .const import APIVERSION, APPVERSION, HEADERS
+from .local import LocalAdapter, LocalError, build_frame
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -195,6 +196,8 @@ class MelViewDevice:
         self._json = None
         self._localcontrol = localcontrol
         self._localip = None
+        self._local = None
+        self._local_ok = True
         self._standby = 0
         self._zones = {}
 
@@ -216,6 +219,14 @@ class MelViewDevice:
                     "only be sent through MelView",
                     self.get_friendly_name(),
                 )
+            # Air conditioners are read and controlled directly over the LAN;
+            # other unit types keep pushing the cloud's command key
+            elif self._caps.get("unittype") == "ATA":
+                if self._local is None:
+                    self._local = LocalAdapter(
+                        self._localip, self._authentication.session
+                    )
+                self._local.host = self._localip
         # Fanstage 0 means the unit has no fan control, e.g. air-to-water units
         if self._caps.get("fanstage") in FANSTAGES:
             self.fan = dict(FANSTAGES[self._caps["fanstage"]])
@@ -252,13 +263,65 @@ class MelViewDevice:
             )
         return True
 
+    def _use_local(self):
+        """Whether to talk to the adapter directly; units with zones can't."""
+        return self._local is not None and not self._zones
+
+    def _local_failed(self, action, err):
+        """Log the first local failure as a warning and repeats at debug."""
+        if self._local_ok:
+            _LOGGER.warning(
+                "%s: local %s failed, using MelView instead: %s",
+                self.get_friendly_name(),
+                action,
+                err,
+            )
+        else:
+            _LOGGER.debug("Local %s failed again: %s", action, err)
+        self._local_ok = False
+
+    def _local_worked(self, data):
+        """Store unit state read from the adapter."""
+        if not self._local_ok:
+            _LOGGER.info("%s: local control restored", self.get_friendly_name())
+        self._local_ok = True
+        # Standby is only reported by MelView
+        data["standby"] = self._standby
+        self._json = data
+        self._last_info_time_s = time.time()
+
+    async def _async_local_status(self):
+        """Read the unit state from the adapter; return False if that failed."""
+        try:
+            self._local_worked(await self._local.async_get_status())
+        except LocalError as err:
+            self._local_failed("status read", err)
+            return False
+        return True
+
     async def async_refresh_device_info(self):
+        # The first refresh always goes to MelView, which reports zones and standby
+        if (
+            self._use_local()
+            and self._json is not None
+            and await self._async_local_status()
+        ):
+            return True
+
         self._json = None
         self._last_info_time_s = time.time()
 
-        self._json = await self._authentication.async_api_post(
-            "unitcommand.aspx", {"unitid": self._deviceid, "v": APIVERSION}
-        )
+        try:
+            self._json = await self._authentication.async_api_post(
+                "unitcommand.aspx", {"unitid": self._deviceid, "v": APIVERSION}
+            )
+        except MelViewAuthError:
+            raise
+        except (MelViewError, ClientError):
+            # MelView unreachable: the adapter may still answer over the LAN
+            if self._use_local() and await self._async_local_status():
+                return True
+            raise
 
         fault = self._json["fault"]
         error = self._json["error"]
@@ -308,6 +371,17 @@ class MelViewDevice:
         _LOGGER.debug("Command issued: %s", command)
 
         await self.async_is_info_valid()
+
+        built = build_frame(command) if self._use_local() else None
+        if built is not None:
+            frame, expect = built
+            try:
+                self._local_worked(await self._local.async_send(frame, expect))
+            except LocalError as err:
+                self._local_failed(f"command {command}", err)
+            else:
+                _LOGGER.debug("Command %s applied locally", command)
+                return
 
         data = await self._authentication.async_api_post(
             "unitcommand.aspx",
@@ -383,6 +457,8 @@ class MelViewDevice:
         )
         self._localip = localip
         self._caps["localip"] = localip
+        if self._local is not None:
+            self._local.host = localip
         return True
 
     def get_id(self):

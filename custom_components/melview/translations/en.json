@@ -23,7 +23,7 @@
                 "data_description": {
                     "email": "The email you use to log in to the Mitsubishi Electric Wi-Fi Control app.",
                     "password": "The password for that account.",
-                    "local": "Send commands directly to the device over LAN. Internet is still required to verify and dispatch commands.",
+                    "local": "Send commands directly to the device over LAN. Air conditioners without zones are also controlled and read over LAN, using the internet only as a fallback; other units still need it to verify and dispatch commands.",
                     "sensor": "Create sensor entities for room temperature, plus air temperature and core efficiency sensors for Lossnay units."
                 },
                 "description": "Enter your AU/NZ Mitsubishi Electric Wi‑Fi Control account credentials.\n\n0.5° temperature steps will be available if enabled in the Wi‑Fi Control app.",
@@ -59,7 +59,7 @@
                     "sensor": "Current temperature"
                 },
                 "data_description": {
-                    "local": "Send commands directly to the device over LAN. Internet is still required to verify and dispatch commands.",
+                    "local": "Send commands directly to the device over LAN. Air conditioners without zones are also controlled and read over LAN, using the internet only as a fallback; other units still need it to verify and dispatch commands.",
                     "sensor": "Create sensor entities for room temperature, plus air temperature and core efficiency sensors for Lossnay units."
                 },
                 "description": "0.5° temperature steps will be available if enabled in the Wi‑Fi Control app.",

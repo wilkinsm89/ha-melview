@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import (
     AiohttpClientMockResponse,
 )
 
+from custom_components.melview import local
 from custom_components.melview.const import CONF_LOCAL, CONF_SENSOR, DOMAIN
 
 API_URL = "https://api.melview.net/api"
@@ -76,6 +77,13 @@ class MelViewApi:
         self.hang: set[str] = set()
         # Key returned with each command for sending it over the LAN
         self.local_command: str | None = "LOCALCMD"
+        # Answer LAN requests like a real adapter, instead of only accepting
+        # the cloud's command key
+        self.adapter = False
+        # The adapter accepts SET frames but the unit never applies them
+        self.adapter_ignores_writes = False
+        # CN105 SET frames the adapter received, as hex
+        self.adapter_frames: list[str] = []
 
         aioclient_mock.post(f"{API_URL}/login.aspx", side_effect=self._login)
         for endpoint in ("rooms.aspx", "unitcapabilities.aspx", "unitcommand.aspx"):
@@ -157,7 +165,54 @@ class MelViewApi:
             raise exc
         if url.host in self.unreachable_ips:
             raise ClientError("No route to host")
-        return AiohttpClientMockResponse(method, url, status=self._status("smart"))
+        status = self._status("smart")
+        if not self.adapter or status != 200:
+            return AiohttpClientMockResponse(method, url, status=status)
+        try:
+            request = local.decrypt(local.ESV_RE.search(data).group(1))
+        except local.LocalError:
+            # Not encrypted with the factory key, e.g. a cloud command key
+            return AiohttpClientMockResponse(method, url, status=status)
+        for frame in local.VALUE_RE.findall(request):
+            self.adapter_frames.append(frame)
+            if not self.adapter_ignores_writes:
+                self._apply_frame(bytes.fromhex(frame))
+        reply = local.encrypt(f"<LSV>{self._status_codes()}</LSV>")
+        return AiohttpClientMockResponse(
+            method, url, status=status, text=local.REQUEST.format(reply)
+        )
+
+    def _apply_frame(self, frame: bytes) -> None:
+        """Apply a CN105 SET frame the way the real unit would."""
+        flags = frame[6]
+        if flags & local.FLAG_POWER:
+            self.unit["power"] = frame[8]
+        if flags & local.FLAG_MODE:
+            self.unit["setmode"] = frame[9]
+        if flags & local.FLAG_TEMP:
+            self.unit["settemp"] = f"{(frame[19] - 0x80) / 2:g}"
+        if flags & local.FLAG_FAN:
+            self.unit["setfan"] = frame[11]
+
+    def _status_codes(self) -> str:
+        """CN105 status frames for the unit's current state."""
+        unit = self.unit
+        settings = bytearray(22)
+        settings[0:6] = bytes.fromhex("fc6201301002")
+        settings[8] = unit["power"]
+        settings[9] = 0 if unit["setmode"] == 8 else unit["setmode"]
+        settings[11] = unit["setfan"]
+        settings[16] = 0x80 + round(float(unit["settemp"]) * 2)
+        sensors = bytearray(22)
+        sensors[0:6] = bytes.fromhex("fc6201301003")
+        sensors[11] = 0x80 + round(float(unit["roomtemp"]) * 2)
+        if "outdoortemp" in unit:
+            sensors[10] = 0x80 + round(float(unit["outdoortemp"]) * 2)
+        codes = ""
+        for frame in (settings, sensors):
+            frame[21] = local.checksum(frame)
+            codes += f"<CODE><VALUE>{frame.hex()}</VALUE></CODE>"
+        return codes
 
     def _apply(self, command: str) -> None:
         """Update the unit state the way the real unit would."""
@@ -181,6 +236,20 @@ class MelViewApi:
 def melview_api(aioclient_mock: AiohttpClientMocker) -> MelViewApi:
     """Return the fake MelView API."""
     return MelViewApi(aioclient_mock)
+
+
+@pytest.fixture
+def adapter_api(melview_api: MelViewApi) -> Generator[MelViewApi]:
+    """Return the fake MelView API with a zoneless unit and a real adapter."""
+    del melview_api.unit["zones"]
+    melview_api.unit["outdoortemp"] = "14"
+    melview_api.adapter = True
+    with (
+        patch.object(local, "MIN_REQUEST_GAP_S", 0.01),
+        patch.object(local, "SETTLE_POLL_S", 0.01),
+        patch.object(local, "SETTLE_TIMEOUT_S", 0.1),
+    ):
+        yield melview_api
 
 
 @pytest.fixture

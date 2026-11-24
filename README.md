@@ -58,6 +58,8 @@ These Wi-Fi adapters require an internet connection, however, it is possible for
 
 In practice, this is still much quicker than waiting up to 30 seconds for the adapter to check in with the melview server to receive commands.
 
+For air conditioners without zones, local commands go one step further: power, mode, temperature (including 0.5 deg steps) and fan speed are sent straight to the adapter, and the unit's state is read from it, without going through the melview server. The integration waits for the unit to report each change, and falls back to the melview server whenever the adapter does not answer. Setup still needs the melview server, as do zones, Lossnay units, standby and fault reporting. This has been tested on an MSZ-AP25VG with a MAC-578IF-E adapter.
+
 For truly local control, these adapters are also compatible with the ECHONETLite protocol, which has a [very well maintained HACS integration](https://github.com/scottyphillips/echonetlite_homeassistant). However, the ECHONETLite protocol does not support zones, nor 0.5 deg temperature steps.
 
 ## Lossnay support
